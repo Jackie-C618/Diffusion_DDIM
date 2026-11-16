@@ -42,7 +42,7 @@ Diffusion_DDIM/
 
 ---
 
-## 🧮 核心公式：采样与反演并排看
+## 🧮 公式
 
 **前向过程**：
 
@@ -100,9 +100,9 @@ x_{t-1} = (1/√α_t) · ( x_t - (β_t / √(1-ᾱ_t)) · ε_θ ) + √β_t · z
 
 ## 🎛️ η 可取任意实数
 
-`--eta` 与 `ddim_sample(eta=...)` / `ddim_invert(eta=...)` **可为任意实数**，
+`--eta` **可为任意实数**，
 代码里用 `|η|` 计算标准差（标准差必须非负，且 `z~N(0,I)` 关于 0 对称，
-所以 `σ·z` 与 `-σ·z` 同分布，负 η 与 `|η|` 统计等价）。
+所以 `σ·z` 与 `-σ·z` 同分布，负 η 与 `|η|` 统计等价）
 
 | η | 行为 | 典型用途 |
 |---|---|---|
@@ -114,7 +114,7 @@ x_{t-1} = (1/√α_t) · ( x_t - (β_t / √(1-ᾱ_t)) · ε_θ ) + √β_t · z
 
 > ⚠️ 判断「要不要抽 z」必须看 `|η| > 0`。旧版写成 `eta > 0`，
 > 负 η 时噪声项被静默丢掉、退化成错误的确定性路径——本版已修，
-> `python ddim.py` 里有专门的回归测试。
+> `python ddim.py` 里有专门的回归测试
 > `T=1000` 仍在 `config.py`，但那是**训练时的总步数**；采样步数由`ddim_steps` 单独控制，两者不要混淆。
 
 ---
@@ -203,7 +203,7 @@ python sample.py          # DDPM：1000 步
 python sample_ddim.py     # DDIM： 50 步
 ```
 
-观察三件事：
+测试：
 1. **时间**：DDIM 只调用网络 50 次 vs DDPM 1000 次；
 2. **质量**：50 步 DDIM 通常已经能看出数字轮廓，100 步更稳；
 3. **验证**：`python sample_ddim.py` 连跑两次，`samples_ddim.png` 应**完全相同**；
@@ -219,7 +219,7 @@ python sample_ddim.py     # DDIM： 50 步
 | `sampling_traj_ddim.png` | `sample_ddim.py` | 50 步（而非 1000 步）的去噪演化 —— 每帧跨度很大，仍逐步成型 |
 | `interpolation_ddim.png` | `--interp` | 两个 `x_T` 之间插值，数字平滑过渡 —— **确定性带来的语义隐空间** |
 | `inversion_ddim.png` | `--inversion` | 上排真实图 / 下排反演重建图 —— **DDIM 可逆编码** |
-| `samples.png` | `sample.py`（DDPM） | 对照组：1000 步马尔可夫采样的结果 |
+| `samples.png` | `sample.py`| 对照组：1000 步马尔可夫采样的结果 |
 | `schedule.png` / `noising.png` / `loss_curve.png` | 同 DDPM | 见 DDPM 版 README |
 
 ---
@@ -259,7 +259,7 @@ python sample_ddim.py     # DDIM： 50 步
 
 ---
 ## 其他
-> ⚠️ 可以用 AST 比对两个文件相同（ BeyondCompare 无法忽略注释）
+> ⚠️ 可以用 AST 比对两个文件相同(BeyondCompare)
 > Python 的注释和 docstring 不参与执行：
 
 ```bash
