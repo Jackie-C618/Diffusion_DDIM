@@ -9,14 +9,13 @@ model.py —— U-Net
       → MidBlock               (B,256,7,7)，含自注意力
       → UpBlock ×2             (B,128,14,14) → (B,64,28,28)，每层 concat 对应 skip
       → out_conv               (B,1,28,28)  ← 预测的噪声
-    形状「进去什么样、出来什么样」是硬要求：因为噪声 ε 和图片 x_t 同尺寸。
 
 【嵌入 时间t】
     同一个 x_t 在不同 t 上，网络该做的去噪强度完全不同。
     不给 t，网络只能学一个「平均意义」的去噪，生成图会一直是灰噪。
     t 经正弦编码成向量后，通过 FiLM（缩放+平移）注入每个 ResidualBlock。
 
-【本文件包含 7 个零件（从下往上读更容易）】
+【共包含 7 个部分】
     TimeEmbedding   整数 t → 连续向量
     ResidualBlock   基础残差块，时间在这里注入
     DownBlock       编码器一层：若干 ResBlock + 下采样，并保存 skip
@@ -25,7 +24,7 @@ model.py —— U-Net
     MidBlock        bottleneck 中段，手动透传 t_emb
     UNet            把上面全部组装起来
 
-【🟡 修复的bug】
+【🟡修复的bug】
     整理版的 bottleneck 写成 nn.Sequential(ResBlock, Attention, ResBlock)，
     但 Sequential 只把上一层输出喂给下一层，第一个 ResidualBlock 收不到
     t_emb → 报 "missing t_emb"。而且已训好的 ckpt 里参数名是 mid.res1.*，
@@ -39,15 +38,16 @@ from config import BASE_CHANNELS, DEPTH, ATTN_AT, TIME_EMB_DIM, DEVICE
 
 
 class TimeEmbedding(nn.Module):
-    """把整数时间步 t 变成连续向量（Transformer 式正弦编码 + 两层 MLP）。
+    """
+    把整数时间步 t 变成连续向量（Transformer 式正弦编码 + 两层 MLP）
 
     输入 : t    形状 (B,) 的整数
     输出 : emb  形状 (B, TIME_EMB_DIM)
-    作用 : 让网络"知道现在是第几步"，这是它学出去噪的前提。
+    作用 : 让网络"知道现在是第几步"，这是它学出去噪的前提
 
     为什么用正弦编码而不是直接把 t/1000 喂进去：
     正弦编码给不同频率的分量，让线性层更容易区分相近的 t；
-    这是 Transformer 位置编码的同款做法，DDPM 原论文也这么用。
+    这是 Transformer 位置编码的同款做法，DDPM 原论文也是这样
     """
 
     def __init__(self, dim=TIME_EMB_DIM):
@@ -79,11 +79,12 @@ class TimeEmbedding(nn.Module):
 
 
 class ResidualBlock(nn.Module):
-    """基础块：GroupNorm→SiLU→Conv →(+时间)→ GroupNorm→SiLU→Conv，最后加残差。
+    """基础块：
+    GroupNorm→SiLU→Conv →(+时间t)→GroupNorm→SiLU→Conv，最后加残差。
 
     输入 : x (B,C,H,W)，t_emb (B, TIME_EMB_DIM)
     输出 : (B, out_ch, H, W)   （不改变空间尺寸）
-    时间注入：t_emb 过一个小线性得到 (scale, shift)，对特征做 FiLM 调制。
+    时间注入：t_emb 过一个小线性得到 (scale, shift)，对特征做 FiLM 调制
 
     残差连接 h + x 的意义：让梯度能直接回传，深层网络更好训；
     同时网络只需学「在输入基础上改动多少」，而不是从头重建整张特征图。
@@ -131,14 +132,14 @@ class ResidualBlock(nn.Module):
 
 
 class DownBlock(nn.Module):
-    """编码器一层：若干 ResBlock + 一次下采样(stride=2 卷积)。
+    """
+    编码器一层：若干 ResBlock + 一次下采样(stride=2 卷积)。
 
     输入 : x (B,in_ch,H,W), t_emb
     输出 : (x_down, skip)
         x_down : (B,out_ch,H/2,W/2) —— 继续往更深层送
-        skip   : (B,out_ch,H,W)     —— 下采样**之前**的特征，存给解码器拼接
-    为什么先存 skip 再下采样：解码器需要的是「同分辨率」的特征，
-    存下采样后的就对不上了。
+        skip   : (B,out_ch,H,W)     —— 下采样之前的特征，存给解码器拼接
+    为什么先存 skip 再下采样：解码器需要的是「同分辨率」的特征，存下采样后的就对不上了。
     """
 
     def __init__(self, in_ch, out_ch, num_res=2):
@@ -149,7 +150,7 @@ class DownBlock(nn.Module):
             # 第一块负责把 in_ch 变成 out_ch；后面的块输入输出都是 out_ch。
             [ResidualBlock(in_ch if i == 0 else out_ch, out_ch) for i in range(num_res)]
         )
-        # stride=2 的 3×3 卷积同时完成「降分辨率」和「保持通道数」。
+        # stride=2 的 3×3 卷积同时完成降分辨率和保持通道数。
         # 用卷积下采样（而非 AvgPool）让网络能自己学怎么压缩信息。
         self.downsample = nn.Conv2d(out_ch, out_ch, 3, stride=2, padding=1)
 
@@ -162,7 +163,8 @@ class DownBlock(nn.Module):
 
 
 class UpBlock(nn.Module):
-    """解码器一层：上采样 + 拼接 skip + 若干 ResBlock。
+    """
+    解码器一层：上采样 + 拼接 skip + 若干 ResBlock。
 
     输入 : x (B,in_ch,H,W)（来自更深一层）, skip (B,skip_ch,2H,2W), t_emb
     输出 : (B,out_ch,2H,2W)
@@ -190,7 +192,7 @@ class UpBlock(nn.Module):
         # 直接 cat 会报错。用插值强制对齐到 skip 的 H,W。
         if x.shape != skip.shape:                 # 防奇偶差 1 像素
             x = F.interpolate(x, size=skip.shape[-2:])
-        # 沿通道维（dim=1）拼接，这就是 U-Net 的「跳跃连接」。
+        # 沿通道维（dim=1）拼接，这就是 U-Net 的跳跃连接。
         # 是 concat 不是 add：add 要求通道数相同且会丢信息，concat 保留两套特征。
         x = torch.cat([x, skip], dim=1)           # 跳跃连接拼接
         for rb in self.res_blocks:
@@ -199,7 +201,8 @@ class UpBlock(nn.Module):
 
 
 class Attention(nn.Module):
-    """bottleneck 自注意力：捕获长程结构（手写数字的笔画）。单头简化版。
+    """
+    bottleneck 自注意力：捕获长程结构（手写数字的笔画）。单头简化版。
 
     卷积只能看局部邻域，但在 7×7 的 bottleneck 上，让每个像素都能
     和所有其它像素交互，有助于把握「这一竖和那一横属于同一个数字」。
@@ -224,24 +227,20 @@ class Attention(nn.Module):
         attn = torch.softmax(q.transpose(1, 2) @ k / (C ** 0.5), dim=-1)
         # (B,H*W,H*W) @ (B,H*W,C) → (B,H*W,C)：按注意力权重加权求和 V。
         out = attn @ v.transpose(1, 2)            # (B, H*W, C)
-        # ⚠️ 严格来说这里应先 .transpose(1,2) 再 reshape，才是标准的
-        #    「位置轴 → 空间轴」还原；直接 reshape 会重排元素顺序。
-        #    但模型已经按这个排列训练好了（ckpt 与之绑定），改成标准写法
-        #    反而会让已有权重失效。为保持连续性这里保留原实现。
+        # 严格来说这里应先 .transpose(1,2) 再 reshape，才是标准的位置轴 → 空间轴还原；直接 reshape 会重排元素顺序。
+        # 但模型已经按这个排列训练好了（ckpt 与之绑定），改成标准写法反而会让已有权重失效。为保持连续性这里保留原实现
         out = out.reshape(B, C, H, W)              # 折回图片形状
-        # 残差连接：x + proj(out)。注意力只学「补充量」，不推翻原特征。
+        # 残差连接：x + proj(out)。注意力只学「补充量」，不推翻原特征
         return x + self.proj(out)
 
 
 class MidBlock(nn.Module):
-    """bottleneck 中段：ResBlock → (可选)自注意力 → ResBlock。
+    """
+    bottleneck 中段：ResBlock → (可选)自注意力 → ResBlock。
 
     ⚠️ 这里**不能**用 nn.Sequential：Sequential 只会把上一层输出喂给下一层，
     第一个 ResidualBlock 就收不到时间嵌入 t_emb（报错 missing t_emb）。
     必须单独写个类，手动把 t_emb 透传进去。
-
-    🟡 这是本文件相对 Diffusion_DDPM 版**唯一的改动**（见 README「必要修复」）。
-    补回它之后，参数名变成 mid.res1.* / mid.res2.*，才能加载训练好的 ckpt。
     """
 
     def __init__(self, ch, use_attn=True):
@@ -253,16 +252,17 @@ class MidBlock(nn.Module):
         self.res2 = ResidualBlock(ch, ch)           # 第二个残差块
 
     def forward(self, x, t_emb):
-        x = self.res1(x, t_emb)                     # ← 关键：t_emb 必须显式传进去
-        x = self.attn(x)                            # 注意力只吃特征，不需要 t
-        x = self.res2(x, t_emb)                     # ← 同样要传
+        x = self.res1(x, t_emb)                     # t_emb 必须显式传进去
+        x = self.attn(x)                            # 注意力只需特征，不需要 t
+        x = self.res2(x, t_emb)                     # 同样要传
         return x
 
 
 class UNet(nn.Module):
-    """完整 U-Net。把上面零件按"编码器—bottleneck—解码器"组装起来。
+    """完整 U-Net。
+    把上面几个部分按照"编码器—bottleneck—解码器"组装。
 
-    forward(x, t) 的形状契约：
+    forward(x, t) ：
         x : (B,1,28,28) 加噪图
         t : (B,) 整数时间步
         返回 : (B,1,28,28) 预测噪声
@@ -300,25 +300,24 @@ class UNet(nn.Module):
         )
 
     def forward(self, x, t):
-        """整条 U 形数据流。对照模块开头那张形状表看最清楚。"""
-        t_emb = self.time_emb(t)                    # (B,) → (B,256)，整网共用
+        """ U 形数据流"""
+        t_emb = self.time_emb(t)                    # (B,) → (B,256)，整个网络共用
         x = self.in_conv(x)                         # (B,1,28,28) → (B,64,28,28)
-        skips = []                                  # 栈：按「由浅到深」存，解码时倒着取
+        skips = []                                  # 栈按由浅到深存，解码时倒着取
         for down in self.downs:
-            x, skip = down(x, t_emb)                # 每层返回「继续下走的」和「留给 skip 的」
+            x, skip = down(x, t_emb)                # 每层返回继续往下走的和留给 skip 的
             skips.append(skip)
         x = self.mid(x, t_emb)                      # bottleneck，形状不变
         for up in self.ups:
-            skip = skips.pop()                      # 后进先出：最深的 skip 先被用到
+            skip = skips.pop()                      # 后进先出，最深的 skip 先被用到
             x = up(x, skip, t_emb)                  # 上采样 → 拼接 → 残差
         return self.out_conv(x)                     # (B,64,28,28) → (B,1,28,28)
 
 
 def test_model():
-    """自检：随机张量跑 forward，断言输入输出同形状、且能反向传播。
-
-    这是最便宜的一道保险：不下载数据、不需要权重，几秒就能确认
-    「形状契约」和「梯度链路」没断。训练前 train.py 也会先调它。
+    """
+    自检：随机张量跑 forward，断言输入输出同形状、且能反向传播。
+    不下载数据、不需要权重，因此自检比较快
     """
     B = 4
     x = torch.randn(B, 1, 28, 28)                   # 伪造一批「加噪图」

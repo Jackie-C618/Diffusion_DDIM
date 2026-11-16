@@ -1,92 +1,25 @@
 # 🎯 DDIM on MNIST
 
 > 在 [Diffusion_DDPM](../Diffusion_DDPM) 的基础上复现 **DDIM**（Denoising Diffusion Implicit Models）
----
-
-## ⭐ DDIM 不改训练，只改采样
-
-> DDIM 构造了一个**和 DDPM 边缘分布完全相同**的前向过程
-> `q(x_t | x_0) = N(√ᾱ_t · x_0, (1-ᾱ_t) I)`，
-> 训练目标 `MSE(ε, ε_θ(x_t, t))` **相同** →
-
-也因此：本文件夹***可以直接拿 DDPM 训好的 `ckpt_last.pt` ***，不需要重新训练。
+> ⭐ DDIM 相比 DDPM 不改训练，只改采样
 
 ---
 
-## 📖 关于这一版的注释（给学习者看的）
-
-每个 `.py` 文件顶部都有一段统一结构的**模块讲解**：
-
-| 段落 | 回答什么问题 |
-|---|---|
-| 在整条链路里的位置 | 谁在上游、谁在下游、被哪些文件 import |
-| 这个模块负责什么 | 职责边界、核心公式 |
-| 不负责什么 | 由哪个其它文件补上 |
-| 怎么单独验证 | 对应的 `python xxx.py` 命令 |
-
-建议学习顺序：
-
-```
-config.py → schedule.py → dataset.py → diffusion.py(只看 q_sample)
-→ train.py → model.py → ddim.py → sample_ddim.py
-```
-
-> ⚠️ **注释是加的，逻辑是没动的**。可以用 AST 比对证明这一点——
-> Python 的注释和 docstring 不参与执行，剥掉 docstring 后两版 AST 完全一致：
-
-```bash
-cd Diffusion_DDIM
-python - <<'PY'
-import ast, pathlib
-def logic(path):
-    tree = ast.parse(pathlib.Path(path).read_text(encoding="utf-8"))
-    for node in ast.walk(tree):                       # 剥掉模块/类/函数的 docstring
-        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef)):
-            b = node.body
-            if b and isinstance(b[0], ast.Expr) and isinstance(b[0].value, ast.Constant) \
-               and isinstance(b[0].value.value, str):
-                node.body = b[1:]
-    return ast.dump(tree, include_attributes=False)
-for f in ["config.py","schedule.py","diffusion.py","dataset.py","train.py","sample.py"]:
-    a = logic(pathlib.Path("../Diffusion_DDPM", f))
-    b = logic(f)
-    print(("逻辑相同  " if a == b else "逻辑不同  ") + f)
-# 这 6 个应全部「逻辑相同」；model.py 因补回 MidBlock 预期不同
-PY
-```
-
----
-
-## 🔍 和 DDPM 版逐文件对照
+## 🔍 对于 DDPM 的改动 
 
 | 文件 | 状态 | 说明 |
 |---|---|---|
-| `config.py` | 🟢 **相同** | 超参不变，`T=1000` 仍是训练用的总步数 |
-| `schedule.py` | 🟢 **相同** | DDIM 只用到 `alpha_bars` / `sqrt_alpha_bars` / `sqrt_one_minus_alpha_bars` |
-| `dataset.py` | 🟢 **相同** | 数据、归一化 `[-1,1]` 不变 |
-| `train.py` | 🟢 **相同**| `q_sample` + `MSE(pred, noise)` 照旧 |
-| `diffusion.py` | 🟢 **相同** | `q_sample` 训练要用；DDPM `sample()`  |
-| `sample.py` | 🟢 **相同**| 保留为 DDPM 1000 步采样入口 |
-| `model.py` | 🟡 **1 处必要修复** + 注释 | 补回 `MidBlock`（见下节） |
-| `ddim.py` | 🔵 **新增** | 采样器 + 跳步子序列 + 插值 + **反演** + **任意实数 η** |
-| `sample_ddim.py` | 🔵 **新增** | 入口：`--steps / --eta / --interp / --inversion` |
-| `.gitignore` | 🟢 相同 | — |
-| `README.md` | 🔵 新增 | 本文件 |
-
-
-### 🟡 修复：`model.py` 的 `MidBlock`
-
-`Diffusion_DDPM/model.py` 的 bottleneck 用了 `nn.Sequential(ResidualBlock, Attention, ResidualBlock)`，
-但 `Sequential` 只把上一层输出喂给下一层，**第一个 `ResidualBlock` 收不到 `t_emb`**：
-
-```
-TypeError: ResidualBlock.forward() missing 1 required positional argument: 't_emb'
-```
-
-而且已训好的 `ckpt_last.pt` 里参数是 `mid.res1.*` / `mid.res2.*`（`MidBlock` 结构），
-整理版却是 `mid.0.*` / `mid.1.*`（`Sequential` 结构）——**权重也加载不上**。
-所以本文件夹补回了 `MidBlock`，把 `self.mid(x)` 改成 `self.mid(x, t_emb)`。
-
+| `config.py` | 🟢 **相同** | 超参数 |
+| `schedule.py` | 🟢 **相同** | 加噪参数表 |
+| `dataset.py` | 🟢 **相同** | 载入数据 |
+| `train.py` | 🟢 **相同**| 训练 |
+| `diffusion.py` | 🟢 **相同** | DDPM 前向过程 |
+| `sample.py` | 🟢 **相同**| DDPM 反向过程 |
+| `model.py` | 🟡 **更新**  | U-net网络 |
+| `ddim.py` | 🔵 **新增** | 采样、**反演**、**任意实数 η**|
+| `sample_ddim.py` | 🔵 **新增** | DDIM 调用窗口及相关测试 |
+| `.gitignore` | 🟢 **相同** | — |
+| `README.md` | 🟡 **更新** | — |
 
 ---
 
@@ -99,10 +32,10 @@ Diffusion_DDIM/
 ├── model.py            🧠 U-Net
 ├── dataset.py          🗂️ 数据集
 ├── train.py            🚀 训练
-├── diffusion.py        🔀 加噪
-├── sample.py           🖼️ DDPM 采样
+├── diffusion.py        🔀 正向加噪过程
+├── sample.py           🖼️ DDPM 反向过程
 ├── ddim.py             ✨ DDIM 采样 / 反演 
-├── sample_ddim.py      ✨ 命令行入口
+├── sample_ddim.py      ✨ DDIM 调用窗口及相关测试
 ├── .gitignore          🚫
 └── README.md
 ```
@@ -111,15 +44,15 @@ Diffusion_DDIM/
 
 ## 🧮 核心公式：采样与反演并排看
 
-**共同的前向公式**（训练时就用它）：
+**前向过程**：
 
 ```
 x_t = √ᾱ_t · x₀ + √(1-ᾱ_t) · ε          →  loss = MSE(ε, ε_θ(x_t, t))
 ```
 
-记 **t = 更噪的一步、s = 更干净的一步**（s < t，两者可以是 τ 里任意相邻两点）。
+记 **t = 噪声更多的一步、s = 噪声更少的一步**（s < t，两者可以是 τ 里任意相邻两点）。
 
-**(A) 由加噪图反推干净图**（采样、反演都用）：
+**(A) 由加噪图反推原始图**：
 
 ```
 pred_x0 = ( x_t - √(1-ᾱ_t) · ε_θ(x_t, t) ) / √ᾱ_t
@@ -135,7 +68,7 @@ x_s  = √ᾱ_s · pred_x0 + √(1 - ᾱ_s - σ²) · ε_θ + σ · z
 `η = 0` ⇒ `σ = 0`，`z` 项消失 ⇒ 完全确定性。
 最后一步 `s = 0`（`ᾱ = 1`）时 `√(1-1)=0`，于是 `x = pred_x0`，即最终生成图。
 
-**(C) DDIM 反演：s → t**（本次新增）
+**(C) DDIM 反演：s → t**
 
 ```
 ε_s     = ε_θ(x_s, s)                         ← 时间步填 s，不是 t
@@ -154,37 +87,35 @@ x_t     = √ᾱ_t · pred_x0 + √(1 - ᾱ_t - σ²) · ε_s + σ · z
 x_{t-1} = (1/√α_t) · ( x_t - (β_t / √(1-ᾱ_t)) · ε_θ ) + √β_t · z,   z ~ N(0,I)
 ```
 
-### 三个关键差别
+### 对比
 
-| | DDPM | DDIM (η=0) |
+| | DDPM | DDIM |
 |---|---|---|
 | 随机性 | 每步都抽 `z`，同一个 `x_T` 每次结果不同 | **不抽噪声**，`x_T` ↔ 生成图一一对应 |
-| 步数 | 必须走满 `T=1000` 步 | 只走子序列 τ，**可跳步** |
-| 用到的量 | 局部的 `β_t`、`α_t` | 全局的 `ᾱ_t`、`ᾱ_s`（所以能跨步） |
-| 附带能力 | — | 语义插值、**反演 / 图像编辑** |
+| 步数 | 必须走满 `T` 步 | 只走子序列 τ，**可跳步** |
+| 参数 | 局部的 `β_t`、`α_t` | 全局的 `ᾱ_t`、`ᾱ_s`（所以能跨步） |
+| 其他 | — | 语义插值、**反演 / 图像编辑** |
 
 ---
 
 ## 🎛️ η 可取任意实数
 
-`--eta` 与 `ddim_sample(eta=...)` / `ddim_invert(eta=...)` **接受任意实数**，
+`--eta` 与 `ddim_sample(eta=...)` / `ddim_invert(eta=...)` **可为任意实数**，
 代码里用 `|η|` 计算标准差（标准差必须非负，且 `z~N(0,I)` 关于 0 对称，
 所以 `σ·z` 与 `-σ·z` 同分布，负 η 与 `|η|` 统计等价）。
 
 | η | 行为 | 典型用途 |
 |---|---|---|
 | `0` | `σ=0`，完全确定性、可逆 | 复现、反演重建、语义插值 |
-| `0 < η < 1` | 介于确定性 DDIM 与 DDPM 之间 | 给样本加点多样性 |
+| `0 < η < 1` | 介于确定性 DDIM 与 DDPM 之间 | 给样本增加随机性 |
 | `1` | `σ` ≈ DDPM 后验标准差 | 最接近 DDPM（但仍可跳步） |
-| `η > 1` | `σ²` 超过目标步噪声预算，方向系数被 `max(...,0)` 截为 0，噪声主导 | 实验：画质会变糊但**不会 NaN** |
-| `η < 0` | 按 `|η|` 处理，与正数统计等价 | 实验：验证符号不影响分布 |
+| `η > 1` | `σ²` 超过目标步噪声预算，方向系数被 `max(...,0)` 截为 0，噪声主导 | 画质会变糊但**不会 NaN** |
+| `η < 0` | 按 `|η|` 处理，与正数统计等价 | 验证符号不影响分布 |
 
-> ⚠️ 实现易错点：判断「要不要抽 z」必须看 `|η| > 0`。旧版写成 `eta > 0`，
+> ⚠️ 判断「要不要抽 z」必须看 `|η| > 0`。旧版写成 `eta > 0`，
 > 负 η 时噪声项被静默丢掉、退化成错误的确定性路径——本版已修，
 > `python ddim.py` 里有专门的回归测试。
->
-> `T=1000` 仍在 `config.py`，但那是**训练时的总步数**；采样步数由
-> `ddim_steps` 单独控制，两者不要混淆。
+> `T=1000` 仍在 `config.py`，但那是**训练时的总步数**；采样步数由`ddim_steps` 单独控制，两者不要混淆。
 
 ---
 
@@ -207,7 +138,7 @@ x₀ --ddim_invert--> x_T --ddim_sample--> x₀'
 ```bash
 python sample_ddim.py --inversion                 # 默认 50 步、eta=0
 python sample_ddim.py --inversion --steps 100    # 步数更多，重建误差更小
-python sample_ddim.py --inversion --eta 0.5      # 带随机性，重建「相似但不同」
+python sample_ddim.py --inversion --eta 0.5      # 带随机性，重建相似但不同
 ```
 
 会打印 `反演重建 MAE`，并保存 `inversion_ddim.png`（上排原图、下排重建）。
@@ -215,14 +146,8 @@ python sample_ddim.py --inversion --eta 0.5      # 带随机性，重建「相�
 > ⚠️ **只有 η=0 时反演与采样才严格互逆**。η≠0 会在反演和采样里各注入
 > 随机噪声，重建结果会「相似但不同」——这适合随机图像编辑，不适合验证可逆性。
 > 标准 DDIM inversion 论文里只定义 η=0；本实现把 σ 项带进反演是**对称化的
-> 实验性扩展**（见 `ddim.py` 模块开头的诚实说明）。
->
-> 误差偏大的常见原因：ckpt 没训够（`ε_θ` 不准，误差被逐步放大）、
-> `--steps` 太小（离散化误差）、`--eta` 非 0。
+> 实验性扩展**。
 
-**数据提示**：`--inversion` 会通过 `dataset.py` 取真实 MNIST 图，
-首次运行会在本目录 `data/` 下载（约 10MB，`.gitignore` 已排除）。
-想省这一步，把 `../ddpm_mnist/data` 整个复制过来即可。
 
 ---
 
@@ -232,28 +157,13 @@ python sample_ddim.py --inversion --eta 0.5      # 带随机性，重建「相�
 pip install torch torchvision matplotlib tqdm
 ```
 
-> 💡 若报 `No module named 'torch'` / `torchvision`：说明当前终端的 `python`
-> 不是装了 PyTorch 的那个解释器。双击本目录的 `run_sample_ddim.bat`，
-> 或用绝对路径运行：
-> `...\python\versions\3.13.12\python.exe(Python路径) sample_ddim.py`
-
----
-
-## 🧪 分步测试
-
-```bash
-python schedule.py      # ✅ ᾱ 首尾值自检 + schedule.png
-python model.py         # ✅ UNet 前向 / 反向自检（补回 MidBlock 后通过）
-python ddim.py          # ✅ 跳步 / 确定性 / 任意实数 η / 反演往返 / 无 NaN
-python dataset.py       # ✅ 取一个 batch 验证形状与 [-1,1]（首次下载 MNIST）
+> 💡 若有报错 `No module named 'torch'` / `torchvision`，可写脚本用绝对路径运行：
 ```
-
-`ddim.py` 的自检覆盖：`η ∈ {-2,-1,-0.3,0,0.5,1,2}` 全部数值有限、
-负 η 的噪声项确实生效、反演 `x₀ → x_T → x₀'` 能往返且形状/数值正常。
-
-> 说明：DDPM 版 `diffusion.py` 的「t=0 ≈ 原图」自检因 `ᾱ_0` 问题会失败，
-> 属既有问题，不影响 DDIM。以上四条是本文件夹内可稳定通过的。
-
+@echo off
+cd /d "%~dp0"
+...\python\versions\3.13.12\python.exe(Python路径) sample_ddim.py
+pause
+```
 ---
 
 ## 🚀 运行
@@ -284,14 +194,13 @@ python sample_ddim.py --inversion
 
 ## 🔬 对比实验
 
-同一个 `ckpt_last.pt`，跑两次：
+同一个 `ckpt_last.pt`下运行：
 
 ```bash
-# sample.py 是零改动复制的，它不会自动找权重，只有 DDPM 这边需要先复制
 cp ../ddpm_mnist/ckpt_last.pt .
 
-python sample.py          # DDPM：1000 步，出 samples.png
-python sample_ddim.py     # DDIM： 50 步，出 samples_ddim.png
+python sample.py          # DDPM：1000 步
+python sample_ddim.py     # DDIM： 50 步
 ```
 
 观察三件事：
@@ -315,7 +224,7 @@ python sample_ddim.py     # DDIM： 50 步，出 samples_ddim.png
 
 ---
 
-## 🧩 与 DDIM 论文的出入（延续踩坑笔记的风格）
+## 🧩 与 DDIM 论文的出入
 
 - 论文（Song, Meng & Ermon, *ICLR 2021*）的 **inversion** 只定义 `η=0`；
   本实现把它推广到任意实数 η（对称地把 σ 项带进反演），η≠0 时**不再保证可逆**，
@@ -327,7 +236,7 @@ python sample_ddim.py     # DDIM： 50 步，出 samples_ddim.png
 - 论文有连续时间 / 概率流 ODE 的视角（DDIM 是它的离散特例），本复现只写离散版。
 - 反演用的是「`ε_θ(x_s, s)` 近似 `ε_θ(x_t, t)`」的标准离散近似，
   步数少时误差会累积；论文/后续工作有更高阶的反演方案。
-- 沿用了 DDPM 版的所有简化：线性 schedule、无 EMA、简化 U-Net、方差固定为 `β_t`。
+- 沿用了 DDPM 版的所有简化：无 EMA、简化 U-Net。
 
 ---
 
@@ -347,3 +256,29 @@ python sample_ddim.py     # DDIM： 50 步，出 samples_ddim.png
 
 - Ho et al., *Denoising Diffusion Probabilistic Models* (2020) — DDPM
 - Song, Meng & Ermon, *Denoising Diffusion Implicit Models* (ICLR 2021) — DDIM
+
+---
+## 其他
+> ⚠️ 可以用 AST 比对两个文件相同（ BeyondCompare 无法忽略注释）
+> Python 的注释和 docstring 不参与执行：
+
+```bash
+cd Diffusion_DDIM
+python - <<'PY'
+import ast, pathlib
+def logic(path):
+    tree = ast.parse(pathlib.Path(path).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):                       # 剥掉模块/类/函数的 docstring
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef)):
+            b = node.body
+            if b and isinstance(b[0], ast.Expr) and isinstance(b[0].value, ast.Constant) \
+               and isinstance(b[0].value.value, str):
+                node.body = b[1:]
+    return ast.dump(tree, include_attributes=False)
+for f in ["config.py","schedule.py","diffusion.py","dataset.py","train.py","sample.py"]:
+    a = logic(pathlib.Path("../Diffusion_DDPM", f))
+    b = logic(f)
+    print(("逻辑相同  " if a == b else "逻辑不同  ") + f)
+PY
+```
+---
