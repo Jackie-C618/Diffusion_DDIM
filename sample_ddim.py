@@ -1,43 +1,62 @@
 """
-sample_ddim.py — 加载训练好的模型，用 DDIM 采样器生成图片
+================================================================================
+sample_ddim.py —— DDIM 正向及反向过程
+================================================================================
 
-★ 和 Diffusion_DDPM/sample.py 逐行对照，只有 3 处不同：
+【DDIM VS DDPM】
     1) import 从 `from diffusion import sample` 换成 `from ddim import ddim_sample`
-    2) 多了 --steps / --eta 两个命令行参数（控制跳步数与随机性）
+    2) 多了 --steps / --eta / --interp / --inversion 命令行参数
     3) 输出文件名加 `_ddim` 后缀，方便和 DDPM 的结果并排对比
-  模型、权重、schedule、画图函数**全部沿用 DDPM，没有重复实现**
-  （model.py 仅补回一处既有修复，见 README）。
+    4) find_ckpt() 会自动去隔壁目录借已训好的权重
+    模型、权重、schedule、画图函数**全部沿用 DDPM，没有重复实现**
+    （model.py 仅补回一处既有修复，见 README）。
 
-💡 怎么跑：
-    python sample_ddim.py                    # 默认 50 步、eta=0（确定性）
-    python sample_ddim.py --steps 10        # 只要 10 步，看速度极限
-    python sample_ddim.py --steps 100       # 100 步，通常更清晰
-    python sample_ddim.py --eta 1           # eta=1，行为接近 DDPM
-    python sample_ddim.py --interp          # 隐空间插值演示（DDIM 独有）
+【演示示例】
+    generate()          纯噪声 → 生成图，看 DDIM 跳步采样的成果
+    interpolate_demo()  两个 x_T 之间插值，看确定性带来的语义隐空间
+    inversion_demo()    真实图 → x_T → 重建，看反演是否可逆（本次新增）
+
+【💡 参数示例】
+    python sample_ddim.py                      # 默认 50 步、eta=0
+    python sample_ddim.py --steps 10       
+    python sample_ddim.py --steps 100       
+    python sample_ddim.py --eta 0.5            # 任意实数 η
+    python sample_ddim.py --eta 1              # 行为接近 DDPM
+    python sample_ddim.py --interp             # 隐空间插值演示
+    python sample_ddim.py --inversion         # 反演 + 重建对比
 
     需要 ckpt_last.pt。当前目录没有时，会自动去隔壁已训好的 DDPM 目录借
     （因为 DDIM 和 DDPM 用的是同一个 ε_θ，权重完全通用）。
+================================================================================
 """
-import argparse
-import os
-import torch
+import argparse                                  # 解析 --steps / --eta 等命令行参数
+import os                                        # 拼路径、判断权重文件是否存在
+import torch                                     # 随机数种子、张量
 import matplotlib
-matplotlib.use("Agg")
+matplotlib.use("Agg")                            # 非交互后端：不弹窗，只存文件
+import matplotlib.pyplot as plt                  # inversion 对比图要用
 
 from config import CKPT, DEVICE, SEED
-from model import UNet
-from schedule import make_schedule
-from sample import save_grid                    # ★ 复用 DDPM 的网格图，零改动
-from diffusion import plot_sampling_trajectory  # ★ 复用 DDPM 的轨迹图，零改动
-from ddim import ddim_sample, ddim_interpolate  # ★ 唯一实质差异：换成 DDIM 采样器
+from model import UNet                            # 网络结构（与 DDPM 完全同一个类）
+from schedule import make_schedule                # ᾱ_t 常数表（与 DDPM 完全同一个函数）
+from sample import save_grid                     # ★ 复用 DDPM 的网格图，零改动
+from diffusion import plot_sampling_trajectory    # ★ 复用 DDPM 的轨迹图，零改动
+from ddim import ddim_sample, ddim_invert, ddim_interpolate
+                                                  # ★ 唯一实质差异：换成 DDIM 采样/反演器
 
+# 输出文件名统一加 _ddim，避免覆盖 DDPM 的对照组图片
 DDIM_SAMPLES_PNG = "samples_ddim.png"
 DDIM_TRAJ_PNG = "sampling_traj_ddim.png"
 DDIM_INTERP_PNG = "interpolation_ddim.png"
+DDIM_INVERSION_PNG = "inversion_ddim.png"        # 反演重建对比图（新增）
 
 
 def find_ckpt():
-    """找权重：优先当前目录，其次隔壁两个 DDPM 目录里已训好的那份。"""
+    """找权重：优先当前目录，其次隔壁两个 DDPM 目录里已训好的那份。
+
+    为什么可以「借」：DDIM 不改训练目标，ε_θ 的结构与参数含义和
+    DDPM 完全一致，所以 DDPM 训出来的 state_dict 能直接 load。
+    """
     candidates = [
         CKPT,                                        # 本目录自己 train.py 训出来的
         os.path.join("..", "ddpm_mnist", CKPT),       # 实验版（你已训好 ckpt）
@@ -56,15 +75,19 @@ def load_model():
     """加载 DDPM 训练好的 ε_θ（DDIM 直接复用，一行都不用改）。"""
     ckpt = find_ckpt()
     print("[sample_ddim] 使用权重:", ckpt)
-    model = UNet().to(DEVICE)
+    model = UNet().to(DEVICE)                        # 先按 config 建一个同结构的空网络
     model.load_state_dict(torch.load(ckpt, map_location=DEVICE))
-    model.eval()
+                                                    # 灌入参数；map_location 兼容跨设备加载
+    model.eval()                                    # 切到推理模式
     return model
 
 
 def generate(n=16, ddim_steps=50, eta=0.0):
-    """生成 n 张图，保存 4×4 网格 + 去噪轨迹。"""
-    torch.manual_seed(SEED)
+    """演示 1：从纯噪声生成 n 张图，保存 4×4 网格 + 去噪轨迹。
+
+    η 可传任意实数；η≠0 时每次结果不同，η=0 时连跑两次完全一致。
+    """
+    torch.manual_seed(SEED)                          # 固定种子 → 起点噪声可复现
     model = load_model()
     sched = make_schedule()
 
@@ -75,21 +98,22 @@ def generate(n=16, ddim_steps=50, eta=0.0):
     # 画图函数直接复用 DDPM 版：正好说明「变的只有采样，出图逻辑完全一样」
     save_grid(x, n=int(n ** 0.5), save_path=DDIM_SAMPLES_PNG)
     plot_sampling_trajectory(traj, save_path=DDIM_TRAJ_PNG)
-    print("[sample_ddim] 完成：%d 步采样（DDPM 需 1000 步）" % ddim_steps)
+    print("[sample_ddim] 完成：%d 步采样（DDPM 需 1000 步），eta=%s" % (ddim_steps, eta))
     return x
 
 
 def interpolate_demo(n=4, ddim_steps=50):
-    """【可选】两个随机起点之间插值，展示 DDIM 确定性带来的语义连续变化。
+    """演示 2：两个随机起点之间插值，展示 DDIM 确定性带来的语义连续变化。
 
     ❖ 这图反映什么：
-       从左到右数字平滑" morph "过渡，而不是一堆无关噪声。
+       从左到右数字平滑过渡，而不是一堆无关噪声。
        因为 η=0 时 x_T 与生成图是一一对应的，隐空间才有连续语义。
        DDPM 每步都抽新噪声，做不出这种可控插值。
     """
     torch.manual_seed(SEED)
     model = load_model()
     sched = make_schedule()
+    # n*n 张图正好填满 n×n 网格（save_grid 要求图片数 >= 网格数）
     imgs = ddim_interpolate(model, sched, n=n * n,
                             ddim_steps=ddim_steps, eta=0.0,
                             seed=SEED, device=DEVICE)
@@ -97,18 +121,100 @@ def interpolate_demo(n=4, ddim_steps=50):
     return imgs
 
 
+def plot_inversion_compare(x0, x_recon, save_path=DDIM_INVERSION_PNG):
+    """画反演对比图：上排原图、下排重建图（2 行 × n 列）。
+
+    ❖ 这张图反映什么：
+       η=0 且模型训练充分时，下排应和上排几乎一样 —— 这就是
+       「DDIM 反演是可逆编码」的直观证据。若差别明显，常见原因：
+         · ckpt 没训够（ε_θ 不准，反演误差被逐步放大）
+         · --steps 太小（离散化误差大）
+         · η≠0（反演注入了随机性，本来就不保证精确重建）
+    """
+    # 反归一化（和 sample.save_grid 完全一样的处理），并搬到 CPU 供 matplotlib 用
+    a = (x0.clamp(-1, 1) * 0.5 + 0.5).cpu()
+    b = (x_recon.clamp(-1, 1) * 0.5 + 0.5).cpu()
+    n = a.shape[0]
+    fig, axs = plt.subplots(2, n, figsize=(n * 1.4, 2.8))
+    axs = axs.reshape(2, n)                          # n=1 时也要保持 2D，方便统一索引
+    for j in range(n):
+        axs[0, j].imshow(a[j, 0], cmap="gray")      # 上排：真实图
+        axs[1, j].imshow(b[j, 0], cmap="gray")      # 下排：反演后重建的图
+        axs[0, j].axis("off")
+        axs[1, j].axis("off")
+    axs[0, 0].set_ylabel("x0")                      # 只在第一列标行名，避免重复
+    axs[1, 0].set_ylabel("recon")
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+    print(f"[sample_ddim] 已保存反演对比图 -> {save_path}")
+
+
+def inversion_demo(n=4, ddim_steps=50, eta=0.0):
+    """演示 3（新增）：真实图 → 反演 → 再采样 → 重建，并量化误差。
+
+    流程：
+        x_0 (来自 MNIST，[-1,1])
+          --ddim_invert-->  x_T (隐变量，看起来像噪声)
+          --ddim_sample-->  x_0' (重建图)
+        err = mean(|x_0 - x_0'|)
+
+    ⚠️ 只有 η=0 时反演与采样才严格互逆。η≠0 会在反演和采样里各注入
+       随机噪声，重建结果会「相似但不同」，这适合做随机图像编辑，
+       但不适合用来验证可逆性。
+
+    数据：用 dataset.py 的 loader 取真实图，保证归一化方式与训练一致。
+       首次运行会在本目录 data/ 下载 MNIST（约 10MB，.gitignore 已排除）；
+       想省这一步，把 ../ddpm_mnist/data 整个复制过来即可。
+    """
+    torch.manual_seed(SEED)
+    model = load_model()
+    sched = make_schedule()
+
+    # ① 取 n 张真实图片。标签 _ 用不上：无条件生成/反演都不看类别。
+    from dataset import get_mnist_dataloader        # 延迟 import：只有这个演示需要数据
+    loader = get_mnist_dataloader()
+    x0, _ = next(iter(loader))
+    x0 = x0[:n].to(DEVICE)                          # 只取前 n 张，形状 (n,1,28,28)
+
+    # ② 反演：把真实图沿 τ 升序方向编码成隐变量 x_T
+    x_T, _ = ddim_invert(model, x0, sched, ddim_steps=ddim_steps,
+                         eta=eta, device=DEVICE)
+
+    # ③ 重建：把刚得到的 x_T 作为起点，沿 τ 降序方向采样回来
+    x_recon, _ = ddim_sample(model, sched, shape=x0.shape,
+                             ddim_steps=ddim_steps, eta=eta,
+                             x_T=x_T, device=DEVICE)
+
+    # ④ 量化误差并画图。MAE 越小说明反越接近可逆；训练充分的模型
+    #    在 50~100 步时通常能到较小值。
+    err = (x0 - x_recon).abs().mean().item()
+    print("[sample_ddim] 反演重建 MAE = %.4f  (steps=%d, eta=%s)"
+          % (err, ddim_steps, eta))
+    if eta != 0:
+        print("  提示：eta≠0 时反演含随机性，不保证精确重建；想验证可逆性请用 --eta 0")
+    plot_inversion_compare(x0, x_recon)
+    return x_recon
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="DDIM 采样（复用 DDPM 权重）")
+    parser = argparse.ArgumentParser(description="DDIM 采样 / 插值 / 反演（复用 DDPM 权重）")
     parser.add_argument("--steps", type=int, default=50,
                         help="采样步数，默认 50；DDPM 固定 1000 步")
     parser.add_argument("--eta", type=float, default=0.0,
-                        help="随机性：0=确定性 DDIM，1≈DDPM")
+                        help="随机性系数，可为任意实数：0=确定性，1≈DDPM，"
+                             "负数按 |eta| 处理，>1 噪声主导")
     parser.add_argument("--n", type=int, default=16, help="生成几张图（默认 16）")
     parser.add_argument("--interp", action="store_true",
                         help="改为生成隐空间插值图")
+    parser.add_argument("--inversion", action="store_true",
+                        help="改为反演 + 重建对比（本次新增）")
     args = parser.parse_args()
 
-    if args.interp:
+    # 三种演示互斥，按优先级选一个；--inversion 与 --interp 都给了时以反演为准
+    if args.inversion:
+        inversion_demo(n=4, ddim_steps=args.steps, eta=args.eta)
+    elif args.interp:
         interpolate_demo(n=4, ddim_steps=args.steps)
     else:
         generate(n=args.n, ddim_steps=args.steps, eta=args.eta)

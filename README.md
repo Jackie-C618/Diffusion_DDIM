@@ -1,94 +1,228 @@
 # 🎯 DDIM on MNIST
 
-> 在 [Diffusion_DDPM]的基础上复现 **DDIM**（Denoising Diffusion Implicit Models），
-> **DDIM 不改训练，只改采样**
+> 在 [Diffusion_DDPM](../Diffusion_DDPM) 的基础上复现 **DDIM**（Denoising Diffusion Implicit Models）
 ---
 
+## ⭐ DDIM 不改训练，只改采样
 
-### 🟡 Bug修复`model.py` 的 `MidBlock`
+> DDIM 构造了一个**和 DDPM 边缘分布完全相同**的前向过程
+> `q(x_t | x_0) = N(√ᾱ_t · x_0, (1-ᾱ_t) I)`，
+> 训练目标 `MSE(ε, ε_θ(x_t, t))` **相同** →
 
-复现时实测发现，`DDPM/model.py` 的 bottleneck 用了
-`nn.Sequential(ResidualBlock, Attention, ResidualBlock)`，但 `Sequential`
-只会把上一层输出喂给下一层，**第一个 `ResidualBlock` 收不到 `t_emb`**：
+也因此：本文件夹***可以直接拿 DDPM 训好的 `ckpt_last.pt` ***，不需要重新训练。
+
+---
+
+## 📖 关于这一版的注释（给学习者看的）
+
+每个 `.py` 文件顶部都有一段统一结构的**模块讲解**：
+
+| 段落 | 回答什么问题 |
+|---|---|
+| 在整条链路里的位置 | 谁在上游、谁在下游、被哪些文件 import |
+| 这个模块负责什么 | 职责边界、核心公式 |
+| 不负责什么 | 由哪个其它文件补上 |
+| 怎么单独验证 | 对应的 `python xxx.py` 命令 |
+
+建议学习顺序：
+
+```
+config.py → schedule.py → dataset.py → diffusion.py(只看 q_sample)
+→ train.py → model.py → ddim.py → sample_ddim.py
+```
+
+> ⚠️ **注释是加的，逻辑是没动的**。可以用 AST 比对证明这一点——
+> Python 的注释和 docstring 不参与执行，剥掉 docstring 后两版 AST 完全一致：
+
+```bash
+cd Diffusion_DDIM
+python - <<'PY'
+import ast, pathlib
+def logic(path):
+    tree = ast.parse(pathlib.Path(path).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):                       # 剥掉模块/类/函数的 docstring
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef)):
+            b = node.body
+            if b and isinstance(b[0], ast.Expr) and isinstance(b[0].value, ast.Constant) \
+               and isinstance(b[0].value.value, str):
+                node.body = b[1:]
+    return ast.dump(tree, include_attributes=False)
+for f in ["config.py","schedule.py","diffusion.py","dataset.py","train.py","sample.py"]:
+    a = logic(pathlib.Path("../Diffusion_DDPM", f))
+    b = logic(f)
+    print(("逻辑相同  " if a == b else "逻辑不同  ") + f)
+# 这 6 个应全部「逻辑相同」；model.py 因补回 MidBlock 预期不同
+PY
+```
+
+---
+
+## 🔍 和 DDPM 版逐文件对照
+
+| 文件 | 状态 | 说明 |
+|---|---|---|
+| `config.py` | 🟢 **相同** | 超参不变，`T=1000` 仍是训练用的总步数 |
+| `schedule.py` | 🟢 **相同** | DDIM 只用到 `alpha_bars` / `sqrt_alpha_bars` / `sqrt_one_minus_alpha_bars` |
+| `dataset.py` | 🟢 **相同** | 数据、归一化 `[-1,1]` 不变 |
+| `train.py` | 🟢 **相同**| `q_sample` + `MSE(pred, noise)` 照旧 |
+| `diffusion.py` | 🟢 **相同** | `q_sample` 训练要用；DDPM `sample()`  |
+| `sample.py` | 🟢 **相同**| 保留为 DDPM 1000 步采样入口 |
+| `model.py` | 🟡 **1 处必要修复** + 注释 | 补回 `MidBlock`（见下节） |
+| `ddim.py` | 🔵 **新增** | 采样器 + 跳步子序列 + 插值 + **反演** + **任意实数 η** |
+| `sample_ddim.py` | 🔵 **新增** | 入口：`--steps / --eta / --interp / --inversion` |
+| `.gitignore` | 🟢 相同 | — |
+| `README.md` | 🔵 新增 | 本文件 |
+
+
+### 🟡 修复：`model.py` 的 `MidBlock`
+
+`Diffusion_DDPM/model.py` 的 bottleneck 用了 `nn.Sequential(ResidualBlock, Attention, ResidualBlock)`，
+但 `Sequential` 只把上一层输出喂给下一层，**第一个 `ResidualBlock` 收不到 `t_emb`**：
 
 ```
 TypeError: ResidualBlock.forward() missing 1 required positional argument: 't_emb'
 ```
+
+而且已训好的 `ckpt_last.pt` 里参数是 `mid.res1.*` / `mid.res2.*`（`MidBlock` 结构），
+整理版却是 `mid.0.*` / `mid.1.*`（`Sequential` 结构）——**权重也加载不上**。
+所以本文件夹补回了 `MidBlock`，把 `self.mid(x)` 改成 `self.mid(x, t_emb)`。
+
+
 ---
 
 ## 📂 目录结构
 
 ```
 Diffusion_DDIM/
-├── config.py          ⚙️ （同 DDPM）
-├── schedule.py        📈 （同 DDPM）
-├── model.py           🧠 （同 DDPM，仅补回 MidBlock 修复）
-├── dataset.py         🗂️ （同 DDPM）
-├── train.py           🚀 （同 DDPM）
-├── diffusion.py       🔀 （同 DDPM）保留 DDPM sample() 作对照
-├── sample.py          🖼️ （同 DDPM）DDPM 1000 步采样入口
-├── ddim.py            ✨ DDIM 采样核心（唯一新逻辑）
-├── sample_ddim.py     ✨ DDIM 采样入口（--steps / --eta / --interp）
-├── .gitignore         🚫
+├── config.py           ⚙️ 超参数
+├── schedule.py         📈 加噪过程的参数表
+├── model.py            🧠 U-Net
+├── dataset.py          🗂️ 数据集
+├── train.py            🚀 训练
+├── diffusion.py        🔀 加噪
+├── sample.py           🖼️ DDPM 采样
+├── ddim.py             ✨ DDIM 采样 / 反演 
+├── sample_ddim.py      ✨ 命令行入口
+├── .gitignore          🚫
 └── README.md
 ```
 
 ---
 
-## 🧮 DDPM vs DDIM 
+## 🧮 核心公式：采样与反演并排看
 
-**共同点**：
+**共同的前向公式**（训练时就用它）：
 
 ```
 x_t = √ᾱ_t · x₀ + √(1-ᾱ_t) · ε          →  loss = MSE(ε, ε_θ(x_t, t))
 ```
 
-**DDPM 反向一步**（马尔可夫链：`t` 与 `t-1` 必须相邻，每步都抽新噪声）：
+记 **t = 更噪的一步、s = 更干净的一步**（s < t，两者可以是 τ 里任意相邻两点）。
+
+**(A) 由加噪图反推干净图**（采样、反演都用）：
+
+```
+pred_x0 = ( x_t - √(1-ᾱ_t) · ε_θ(x_t, t) ) / √ᾱ_t
+```
+
+**(B) DDIM 采样：t → s**
+
+```
+σ    = |η| · √( (1-ᾱ_s) / (1-ᾱ_t) ) · √( 1 - ᾱ_t/ᾱ_s )
+x_s  = √ᾱ_s · pred_x0 + √(1 - ᾱ_s - σ²) · ε_θ + σ · z
+```
+
+`η = 0` ⇒ `σ = 0`，`z` 项消失 ⇒ 完全确定性。
+最后一步 `s = 0`（`ᾱ = 1`）时 `√(1-1)=0`，于是 `x = pred_x0`，即最终生成图。
+
+**(C) DDIM 反演：s → t**（本次新增）
+
+```
+ε_s     = ε_θ(x_s, s)                         ← 时间步填 s，不是 t
+pred_x0 = ( x_s - √(1-ᾱ_s) · ε_s ) / √ᾱ_s
+σ       = |η| · √( (1-ᾱ_s) / (1-ᾱ_t) ) · √( 1 - ᾱ_t/ᾱ_s )   ← 与采样同一个 σ
+x_t     = √ᾱ_t · pred_x0 + √(1 - ᾱ_t - σ²) · ε_s + σ · z
+```
+
+> ⭐反演时 `x_t` 还不存在，无法算 `ε_θ(x_t,t)`，
+> 所以**用已知点 `x_s` 处的 `ε_θ(x_s, s)` 近似**，并用同一个 `ε_s`
+> 同时做「预测 x₀」和「重新加噪」。这正是 η=0 时反演与采样互逆的原因。
+
+**DDPM 反向一步**（对照组，马尔可夫链，`t` 与 `t-1` 必须相邻）：
 
 ```
 x_{t-1} = (1/√α_t) · ( x_t - (β_t / √(1-ᾱ_t)) · ε_θ ) + √β_t · z,   z ~ N(0,I)
 ```
 
-**DDIM 反向一步**（非马尔可夫：`t'` 可以是子序列里任意一个更早的点）：
-
-```
-# ① 由 x_t 与预测噪声反推干净图
-pred_x0 = ( x_t - √(1-ᾱ_t) · ε_θ ) / √ᾱ_t
-
-# ② η 决定这一步注入多少随机性
-σ    = η · √( (1-ᾱ_t') / (1-ᾱ_t) ) · √( 1 - ᾱ_t / ᾱ_t' )
-
-# ③ 重新"加噪"到 t'
-x_t' = √ᾱ_t' · pred_x0 + √(1 - ᾱ_t' - σ²) · ε_θ + σ · z
-```
-
-`η = 0` ⇒ `σ = 0`，`z` 项消失：
-
-```
-x_t' = √ᾱ_t' · pred_x0 + √(1-ᾱ_t') · ε_θ        ← 完全确定性
-```
-
-最后一步 `t' = 0`（`ᾱ = 1`）时 `√(1-1)=0`，于是 `x = pred_x0`，即最终生成图。
-
 ### 三个关键差别
 
 | | DDPM | DDIM (η=0) |
 |---|---|---|
-| 随机性 | 每步都抽 `z`，同一个 `x_T` 每次结果不同 | 不抽取噪声，`x_T` ↔ 生成图一一对应 |
-| 步数 | 走满 `T` 步 | 只走子序列 τ，**可跳步** |
-| 变量 | 局部的 `β_t`、`α_t` | 全局的 `ᾱ_t`、`ᾱ_t'` |
+| 随机性 | 每步都抽 `z`，同一个 `x_T` 每次结果不同 | **不抽噪声**，`x_T` ↔ 生成图一一对应 |
+| 步数 | 必须走满 `T=1000` 步 | 只走子序列 τ，**可跳步** |
+| 用到的量 | 局部的 `β_t`、`α_t` | 全局的 `ᾱ_t`、`ᾱ_s`（所以能跨步） |
+| 附带能力 | — | 语义插值、**反演 / 图像编辑** |
 
 ---
 
-## 🎛️ 两个新参数
+## 🎛️ η 可取任意实数
 
-| 参数 | 默认 | 含义 |
+`--eta` 与 `ddim_sample(eta=...)` / `ddim_invert(eta=...)` **接受任意实数**，
+代码里用 `|η|` 计算标准差（标准差必须非负，且 `z~N(0,I)` 关于 0 对称，
+所以 `σ·z` 与 `-σ·z` 同分布，负 η 与 `|η|` 统计等价）。
+
+| η | 行为 | 典型用途 |
 |---|---|---|
-| `ddim_steps` | 50 | 采样步数。从 `[0, T-1]` 等间隔取这么多个点（`make_ddim_timesteps`）。**50 步 ≈ 比 DDPM 快 20 倍**；10 步也能出图但更糊 |
-| `eta` | 0.0 | 随机性开关。`0` = 确定性 DDIM；`1` ≈ DDPM 的后验噪声量 |
+| `0` | `σ=0`，完全确定性、可逆 | 复现、反演重建、语义插值 |
+| `0 < η < 1` | 介于确定性 DDIM 与 DDPM 之间 | 给样本加点多样性 |
+| `1` | `σ` ≈ DDPM 后验标准差 | 最接近 DDPM（但仍可跳步） |
+| `η > 1` | `σ²` 超过目标步噪声预算，方向系数被 `max(...,0)` 截为 0，噪声主导 | 实验：画质会变糊但**不会 NaN** |
+| `η < 0` | 按 `|η|` 处理，与正数统计等价 | 实验：验证符号不影响分布 |
 
-> `T=1000` 仍在 `config.py` 里，但那是**训练时的总步数**（决定 schedule 长度）；
-> DDIM 采样时用多少个点由 `ddim_steps` 单独控制，两者不要混淆。
+> ⚠️ 实现易错点：判断「要不要抽 z」必须看 `|η| > 0`。旧版写成 `eta > 0`，
+> 负 η 时噪声项被静默丢掉、退化成错误的确定性路径——本版已修，
+> `python ddim.py` 里有专门的回归测试。
+>
+> `T=1000` 仍在 `config.py`，但那是**训练时的总步数**；采样步数由
+> `ddim_steps` 单独控制，两者不要混淆。
+
+---
+
+## 🔁 反演 inversion
+
+反演把一张**真实图片**沿确定性路径倒推回隐变量 `x_T`：
+
+```
+x₀ --ddim_invert--> x_T --ddim_sample--> x₀'
+```
+
+**功能**
+
+- **重建验证**：η=0 且模型训练充分时 `x₀' ≈ x₀`，证明 `x_T` 是一个可逆编码；
+- **图像编辑**：在 `x_T` 上做一点修改再采样回来，得到「保留原图结构、局部改变」的结果；
+- **真实图插值**：两张真实图各自反演成 `x_T`，`slerp` 插值后生成过渡图。
+
+**调试运行**
+
+```bash
+python sample_ddim.py --inversion                 # 默认 50 步、eta=0
+python sample_ddim.py --inversion --steps 100    # 步数更多，重建误差更小
+python sample_ddim.py --inversion --eta 0.5      # 带随机性，重建「相似但不同」
+```
+
+会打印 `反演重建 MAE`，并保存 `inversion_ddim.png`（上排原图、下排重建）。
+
+> ⚠️ **只有 η=0 时反演与采样才严格互逆**。η≠0 会在反演和采样里各注入
+> 随机噪声，重建结果会「相似但不同」——这适合随机图像编辑，不适合验证可逆性。
+> 标准 DDIM inversion 论文里只定义 η=0；本实现把 σ 项带进反演是**对称化的
+> 实验性扩展**（见 `ddim.py` 模块开头的诚实说明）。
+>
+> 误差偏大的常见原因：ckpt 没训够（`ε_θ` 不准，误差被逐步放大）、
+> `--steps` 太小（离散化误差）、`--eta` 非 0。
+
+**数据提示**：`--inversion` 会通过 `dataset.py` 取真实 MNIST 图，
+首次运行会在本目录 `data/` 下载（约 10MB，`.gitignore` 已排除）。
+想省这一步，把 `../ddpm_mnist/data` 整个复制过来即可。
 
 ---
 
@@ -100,23 +234,25 @@ pip install torch torchvision matplotlib tqdm
 
 > 💡 若报 `No module named 'torch'` / `torchvision`：说明当前终端的 `python`
 > 不是装了 PyTorch 的那个解释器。双击本目录的 `run_sample_ddim.bat`，
-> 写一个.bat文件用绝对路径运行：
-```@echo off
-cd /d "%~dp0"
- `...python\versions\3.13.12\python.exe sample_ddim.py`
-pause
-```
+> 或用绝对路径运行：
+> `...\python\versions\3.13.12\python.exe(Python路径) sample_ddim.py`
+
 ---
 
 ## 🧪 分步测试
 
 ```bash
-python ddim.py          # ✅ 自检：确定性 / 跳步子序列 / 无 NaN（不需要 ckpt）
+python schedule.py      # ✅ ᾱ 首尾值自检 + schedule.png
 python model.py         # ✅ UNet 前向 / 反向自检（补回 MidBlock 后通过）
+python ddim.py          # ✅ 跳步 / 确定性 / 任意实数 η / 反演往返 / 无 NaN
+python dataset.py       # ✅ 取一个 batch 验证形状与 [-1,1]（首次下载 MNIST）
 ```
 
-`ddim.py` 的自检会用一个临时小 UNet 验证：同一个 `x_T` 在 `η=0` 下两次采样
-**逐像素完全相同**——这是 DDIM 最本质的性质。
+`ddim.py` 的自检覆盖：`η ∈ {-2,-1,-0.3,0,0.5,1,2}` 全部数值有限、
+负 η 的噪声项确实生效、反演 `x₀ → x_T → x₀'` 能往返且形状/数值正常。
+
+> 说明：DDPM 版 `diffusion.py` 的「t=0 ≈ 原图」自检因 `ᾱ_0` 问题会失败，
+> 属既有问题，不影响 DDIM。以上四条是本文件夹内可稳定通过的。
 
 ---
 
@@ -125,19 +261,23 @@ python model.py         # ✅ UNet 前向 / 反向自检（补回 MidBlock 后�
 ```bash
 # 方式 1：直接复用 DDPM 训好的权重
 python sample_ddim.py
+#   自动按顺序找 ckpt_last.pt：本目录 → ../ddpm_mnist/ → ../Diffusion_DDPM/
 
 # 方式 2：重新训练
 python train.py
 python sample_ddim.py
 ```
 
-调参：
+调试：
 
 ```bash
-python sample_ddim.py --steps 10       # 极速 10 步
-python sample_ddim.py --steps 100      # 100 步，通常更清晰
-python sample_ddim.py --eta 1          # 加入随机性，接近 DDPM
-python sample_ddim.py --interp         # 隐空间插值（DDIM 独有）
+python sample_ddim.py --steps 10         
+python sample_ddim.py --steps 100        
+python sample_ddim.py --eta 0.5         
+python sample_ddim.py --eta -1        
+python sample_ddim.py --eta 2          
+python sample_ddim.py --interp        
+python sample_ddim.py --inversion     
 ```
 
 ---
@@ -147,8 +287,7 @@ python sample_ddim.py --interp         # 隐空间插值（DDIM 独有）
 同一个 `ckpt_last.pt`，跑两次：
 
 ```bash
-# 先把权重放到本目录：sample.py 是零改动复制的，它没有自动找权重的逻辑，
-# 而 sample_ddim.py 会自动去 ../ddpm_mnist/ 借，所以只有 DDPM 这边需要复制。
+# sample.py 是零改动复制的，它不会自动找权重，只有 DDPM 这边需要先复制
 cp ../ddpm_mnist/ckpt_last.pt .
 
 python sample.py          # DDPM：1000 步，出 samples.png
@@ -156,10 +295,10 @@ python sample_ddim.py     # DDIM： 50 步，出 samples_ddim.png
 ```
 
 观察三件事：
-1. **耗时**：DDIM 只调用网络 50 次 vs DDPM 1000 次；
+1. **时间**：DDIM 只调用网络 50 次 vs DDPM 1000 次；
 2. **质量**：50 步 DDIM 通常已经能看出数字轮廓，100 步更稳；
-3. **可复现性**：`python sample_ddim.py` 连跑两次，`samples_ddim.png` 应**完全相同**；
-   而 `python sample.py` 连跑两次结果不同
+3. **验证**：`python sample_ddim.py` 连跑两次，`samples_ddim.png` 应**完全相同**；
+   而 `python sample.py` 连跑两次结果不同——这就是「确定性」最直观的证据。
 
 ---
 
@@ -170,19 +309,24 @@ python sample_ddim.py     # DDIM： 50 步，出 samples_ddim.png
 | `samples_ddim.png` | `sample_ddim.py` | DDIM 最终 4×4 生成网格 —— 判断跳步采样有没有成功 |
 | `sampling_traj_ddim.png` | `sample_ddim.py` | 50 步（而非 1000 步）的去噪演化 —— 每帧跨度很大，仍逐步成型 |
 | `interpolation_ddim.png` | `--interp` | 两个 `x_T` 之间插值，数字平滑过渡 —— **确定性带来的语义隐空间** |
+| `inversion_ddim.png` | `--inversion` | 上排真实图 / 下排反演重建图 —— **DDIM 可逆编码** |
 | `samples.png` | `sample.py`（DDPM） | 对照组：1000 步马尔可夫采样的结果 |
 | `schedule.png` / `noising.png` / `loss_curve.png` | 同 DDPM | 见 DDPM 版 README |
 
 ---
 
-## 🧩 与 DDIM 论文的出入
+## 🧩 与 DDIM 论文的出入（延续踩坑笔记的风格）
 
-- 论文（Song, Meng & Ermon, *ICLR 2021*）还给了一个很有用的 **反演 / inversion**：
-  把真实图片沿确定性路径编码回 `x_T`，从而实现图像编辑。本复现**只做了采样与插值**。
-- 论文的 `η` 可取任意实数；我们只暴露 `0`（确定性）与 `1`（≈DDPM）两个典型值。
+- 论文（Song, Meng & Ermon, *ICLR 2021*）的 **inversion** 只定义 `η=0`；
+  本实现把它推广到任意实数 η（对称地把 σ 项带进反演），η≠0 时**不再保证可逆**，
+  属于实验性扩展，不是论文原样。
+- 论文把 η 当作 `[0,1]` 的插值系数；本实现接受**任意实数**，负 η 按 `|η|` 处理、
+  η>1 用 `max(...,0)` 保护方向系数（论文未讨论这些区间）。
 - 子序列 τ 用最简单的**等间隔 `linspace`**；论文也提到二次间隔等其它取法，
   在步数很少时会影响质量。
 - 论文有连续时间 / 概率流 ODE 的视角（DDIM 是它的离散特例），本复现只写离散版。
+- 反演用的是「`ε_θ(x_s, s)` 近似 `ε_θ(x_t, t)`」的标准离散近似，
+  步数少时误差会累积；论文/后续工作有更高阶的反演方案。
 - 沿用了 DDPM 版的所有简化：线性 schedule、无 EMA、简化 U-Net、方差固定为 `β_t`。
 
 ---
@@ -191,9 +335,11 @@ python sample_ddim.py     # DDIM： 50 步，出 samples_ddim.png
 
 - **`FileNotFoundError: ckpt_last.pt`** → 先跑 `python train.py`，或把 DDPM 的权重复制过来。
 - **生成全是灰噪** → 权重没训好；或 `--steps` 太小（试 50→100）。
-- **输出 NaN** → 检查 `σ` 根号内；代码里已用 `max(..., 0)` 保护，正常不会触发。
+- **输出 NaN** → 检查 `σ` 根号内；代码已用 `max(...,0)` 与 `1e-12` 分母保护，正常不会触发。
+- **`--eta` 很大时图变糊** → 预期行为（σ² 超标、方向项被截断），不是 bug。
+- **反演重建误差大** → 检查是否 `--eta 0`、ckpt 是否训够、`--steps` 是否足够。
 - **`--steps` 设得比 `T` 大** → `make_ddim_timesteps` 会断言报错，把步数降到 `≤1000`。
-- **形状报错** → 确认 `sample_ddim.py` 里 `n` 是完全平方数（默认 16 = 4×4）。
+- **形状报错** → 确认 `--n` 是完全平方数（默认 16 = 4×4）。
 
 ---
 
