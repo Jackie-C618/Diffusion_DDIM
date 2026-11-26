@@ -13,3 +13,5 @@ __pycache__/
 
 # 运行脚本
 *.bat
+
+*.json

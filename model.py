@@ -10,7 +10,7 @@ model.py —— U-Net
       → UpBlock ×2             (B,128,14,14) → (B,64,28,28)，每层 concat 对应 skip
       → out_conv               (B,1,28,28)  ← 预测的噪声
 
-【嵌入 时间t】
+【嵌入 时间 t】
     同一个 x_t 在不同 t 上，网络该做的去噪强度完全不同。
     不给 t，网络只能学一个「平均意义」的去噪，生成图会一直是灰噪。
     t 经正弦编码成向量后，通过 FiLM（缩放+平移）注入每个 ResidualBlock。
@@ -24,11 +24,6 @@ model.py —— U-Net
     MidBlock        bottleneck 中段，手动透传 t_emb
     UNet            把上面全部组装起来
 
-【🟡修复的bug】
-    整理版的 bottleneck 写成 nn.Sequential(ResBlock, Attention, ResBlock)，
-    但 Sequential 只把上一层输出喂给下一层，第一个 ResidualBlock 收不到
-    t_emb → 报 "missing t_emb"。而且已训好的 ckpt 里参数名是 mid.res1.*，
-    Sequential 版是 mid.0.*，权重也加载不上。故补回 MidBlock 类手动透传。
 ================================================================================
 """
 import torch                                    
@@ -56,7 +51,7 @@ class TimeEmbedding(nn.Module):
         self.dim = dim                              # 记下维度，forward 里要用来算 half
         self.mlp = nn.Sequential(                  # 一个小的两层 MLP，把固定编码变成可学习的表示
             nn.Linear(dim, dim * 4),               # 先升维到 4 倍，给非线性留空间
-            nn.SiLU(),                              # 激活函数（DDPM 系常用 SiLU，比 ReLU 平滑）
+            nn.SiLU(),                              # DDPM激活函数常用 SiLU，比 ReLU 平滑）
             nn.Linear(dim * 4, dim),               # 再压回 dim，作为最终的时间向量
         )
 
@@ -300,7 +295,7 @@ class UNet(nn.Module):
         )
 
     def forward(self, x, t):
-        """ U 形数据流"""
+        """ U-net"""
         t_emb = self.time_emb(t)                    # (B,) → (B,256)，整个网络共用
         x = self.in_conv(x)                         # (B,1,28,28) → (B,64,28,28)
         skips = []                                  # 栈按由浅到深存，解码时倒着取

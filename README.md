@@ -16,7 +16,7 @@
 | `diffusion.py` | 🟢 **相同** | DDPM 前向过程 |
 | `sample.py` | 🟢 **相同**| DDPM 反向过程 |
 | `model.py` | 🟡 **更新**  | U-net网络 |
-| `ddim.py` | 🔵 **新增** | 采样、**反演**、**任意实数 η**|
+| `ddim.py` | 🔵 **新增** | 采样、反演|
 | `sample_ddim.py` | 🔵 **新增** | DDIM 调用窗口及相关测试 |
 | `.gitignore` | 🟢 **相同** | — |
 | `README.md` | 🟡 **更新** | — |
